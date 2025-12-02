@@ -339,29 +339,49 @@ def visualize_layer_activations_on_real_images(model, dataloader, target_layer_i
     plt.show()
 
 
-def visualize_activation_maps_for_image(model, image, target_layer_index, layer_name):
+def visualize_activation_maps_for_image(model, image, target_layer_index, layer_name, image_label=None, num_maps=64):
     """
     Show top activated feature maps for a single image as a grid.
     """
     model.eval()
     activation_model = nn.Sequential(*list(model.features.children())[:target_layer_index + 1])
-    image = image.unsqueeze(0).to(next(model.parameters()).device)
+    image_tensor = image.unsqueeze(0).to(next(model.parameters()).device)
 
     with torch.no_grad():
-        activations = activation_model(image).squeeze(0).cpu().numpy()  # C, H, W
+        activations = activation_model(image_tensor).squeeze(0).cpu().numpy()  # C, H, W
 
-    # Get top 16 activated channels by mean activation
+    # Get top num_maps activated channels by mean activation
     mean_activations = np.mean(activations, axis=(1, 2))
-    top_channels = np.argsort(mean_activations)[-16:][::-1]
+    num_channels = min(num_maps, activations.shape[0])
+    top_channels = np.argsort(mean_activations)[-num_channels:][::-1]
 
-    fig, axes = plt.subplots(4, 4, figsize=(12, 12))
-    fig.suptitle(f'{layer_name}: Top 16 Activated Feature Maps', fontsize=14)
+    # Calculate grid size (8x8 for 64 maps)
+    cols = int(np.ceil(np.sqrt(num_channels)))
+    rows = int(np.ceil(num_channels / cols))
 
-    for idx, ch in enumerate(top_channels):
-        ax = axes.flat[idx]
+    fig, axes = plt.subplots(rows, cols, figsize=(16, 16))
+    title = f'{layer_name}: Top {num_channels} Activated Feature Maps'
+    if image_label is not None:
+        title += f' (Image: {image_label})'
+    fig.suptitle(title, fontsize=16)
+
+    # Show original image in the first subplot
+    ax = axes.flat[0] if rows > 1 else axes[0]
+    img_display = np.transpose(image.cpu().numpy() / 2 + 0.5, (1, 2, 0))
+    ax.imshow(np.clip(img_display, 0, 1))
+    ax.set_title('Original Image', fontweight='bold')
+    ax.axis('off')
+
+    # Show feature maps starting from index 1
+    for idx, ch in enumerate(top_channels[:num_channels-1]):
+        ax = axes.flat[idx + 1] if rows > 1 else axes[idx + 1]
         ax.imshow(normalize_map(activations[ch]), cmap='viridis')
-        ax.set_title(f'Ch {ch} (μ={mean_activations[ch]:.2f})')
+        ax.set_title(f'Ch {ch} (μ={mean_activations[ch]:.2f})', fontsize=8)
         ax.axis('off')
+
+    # Hide any unused subplots
+    for idx in range(num_channels, rows * cols):
+        axes.flat[idx].axis('off')
 
     plt.tight_layout()
     plt.show()
@@ -486,7 +506,8 @@ if __name__ == "__main__":
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(net.parameters(), lr=0.001)
 
-        for epoch in range(10):
+        # the original AlexNet was trained over 90 epochs
+        for epoch in range(90):
             running_loss = 0.0
             for i, data in enumerate(trainloader, 0):
                 inputs, labels = data
@@ -508,93 +529,64 @@ if __name__ == "__main__":
     embeddings, labels, images = get_embeddings(net, testloader, device)
     plot_embeddings(embeddings, labels, images, classes)
 
-    print("\nVisualizing feature maps for a sample image...")
-    sample_image, sample_label = next(iter(testloader))
-    sample_image = sample_image[0]
-    sample_label_name = classes[sample_label[0]]
-
-    img_display = np.transpose(sample_image.numpy() / 2 + 0.5, (1, 2, 0))
-    plt.imshow(img_display)
-    plt.title(f'Original Image - Class: {sample_label_name}')
-    plt.axis('off')
-    plt.show()
-
-    print("\nGenerating Grad-CAM visualization...")
-    superimposed_img, heatmap = generate_grad_cam(net, sample_image)
-
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
-    ax1.imshow(np.transpose(sample_image.numpy() / 2 + 0.5, (1, 2, 0)))
-    ax1.set_title(f'Original Image: {sample_label_name}')
-    ax1.axis('off')
-    ax2.imshow(heatmap, cmap='jet')
-    ax2.set_title('Grad-CAM Heatmap')
-    ax2.axis('off')
-    ax3.imshow(superimposed_img)
-    ax3.set_title('Superimposed Image')
-    ax3.axis('off')
-    plt.tight_layout()
-    plt.show()
-
-    # ===== THREE-PRONGED FEATURE VISUALIZATION APPROACH =====
-    print("\n" + "="*60)
-    print("FEATURE PATTERN VISUALIZATION - THREE STRATEGIES:")
-    print("="*60)
-
-    conv_layer_indices = [i for i, layer in enumerate(net.features) if isinstance(layer, nn.Conv2d)]
-    selected_layers = conv_layer_indices[:3]  # First 3 conv layers
-
-    # Strategy 1: Top activated maps for the single sample image
-    print("\n[1/3] Showing TOP ACTIVATED FEATURE MAPS for sample image...")
-    for idx, layer_idx in enumerate(selected_layers):
-        visualize_activation_maps_for_image(net, sample_image, target_layer_index=layer_idx,
-                                           layer_name=f"Conv Layer {idx+1} (Index {layer_idx})")
-
-    # Strategy 2: Real images from dataset that maximally activate each channel
-    print("\n[2/3] Showing REAL DATASET IMAGES that maximize each channel's activation...")
-    for idx, layer_idx in enumerate(selected_layers):
-        visualize_layer_activations_on_real_images(net, testloader, target_layer_index=layer_idx,
-                                                   layer_name=f"Conv Layer {idx+1} (Index {layer_idx})",
-                                                   device=device, num_channels=8, k=3)
-
-    # Strategy 3: Synthetic optimal inputs via feature inversion
-    print("\n[3/3] Generating ACTIVATION ATLAS (synthetic optimal inputs)...")
-    generate_activation_atlas(net, selected_layers, grid_size=4)
-
-    # In the __name__ == "__main__" block, after existing visualizations:
-
-    print("\n[4/3] Per-channel Feature Inversion Atlas...")
-    generate_activation_atlas_per_channel(net, selected_layers, num_channels=8)
-
-    print("\n[5/3] Real vs Synthetic Feature Comparison...")
-    for idx, layer_idx in enumerate(selected_layers):
-        compare_real_vs_synthetic(net, testloader, target_layer_index=layer_idx,
-                                 layer_name=f"Conv Layer {idx+1}", device=device, num_channels=4)
-
-    # In the __name__ == "__main__" block, replace the visualization calls with:
-
     print("\n" + "=" * 60)
-    print("FEATURE PATTERN VISUALIZATION - ALL 64 CHANNELS:")
+    print("FEATURE PATTERN VISUALIZATION - TOP 64 ACTIVATED CHANNELS")
     print("=" * 60)
+
+    # Configuration: Number of random sample images to visualize
+    n_samples = 5  # Change this value to visualize more or fewer images
+
+    # Get all test images for random sampling
+    all_test_images = []
+    all_test_labels = []
+    for images_batch, labels_batch in testloader:
+        all_test_images.append(images_batch)
+        all_test_labels.append(labels_batch)
+    all_test_images = torch.cat(all_test_images, dim=0)
+    all_test_labels = torch.cat(all_test_labels, dim=0)
+
+    # Randomly select n sample images
+    total_images = len(all_test_images)
+    random_indices = np.random.choice(total_images, size=min(n_samples, total_images), replace=False)
 
     conv_layer_indices = [i for i, layer in enumerate(net.features) if isinstance(layer, nn.Conv2d)]
     first_conv_layer = conv_layer_indices[0]  # First conv layer (outputs 64 channels)
 
-    # Strategy 1: Top activated maps for the single sample image
-    print("\n[1/4] Showing TOP 64 ACTIVATED FEATURE MAPS for sample image...")
-    visualize_activation_maps_for_image(net, sample_image, target_layer_index=first_conv_layer,
-                                        layer_name="Conv Layer 1 - All 64 Filters")
+    print(f"\nGenerating visualizations for {len(random_indices)} randomly selected images...")
 
-    # Strategy 2: Real images from dataset that maximally activate each channel
-    print("\n[2/4] Showing REAL DATASET IMAGES that maximize each of 64 channels...")
-    visualize_layer_activations_on_real_images(net, testloader, target_layer_index=first_conv_layer,
-                                               layer_name="Conv Layer 1 - All 64 Filters",
-                                               device=device, num_channels=64, k=3)
+    for idx, image_idx in enumerate(random_indices):
+        sample_image = all_test_images[image_idx]
+        sample_label = all_test_labels[image_idx].item()
+        sample_label_name = classes[sample_label]
 
-    # Strategy 3: Per-channel feature inversion (synthetic optimal inputs)
-    print("\n[3/4] Generating PER-CHANNEL FEATURE INVERSION for all 64 channels...")
-    generate_activation_atlas_per_channel(net, [first_conv_layer], num_channels=64)
+        print(f"\n[{idx + 1}/{len(random_indices)}] Processing image {image_idx} (Class: {sample_label_name})")
 
-    # Strategy 4: Real vs Synthetic comparison
-    print("\n[4/4] Real vs Synthetic Feature Comparison for 64 channels...")
-    compare_real_vs_synthetic(net, testloader, target_layer_index=first_conv_layer,
-                              layer_name="Conv Layer 1 - All 64 Filters", device=device, num_channels=64)
+        # Generate Grad-CAM visualization
+        print(f"  - Generating Grad-CAM visualization...")
+        superimposed_img, heatmap = generate_grad_cam(net, sample_image)
+
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+        ax1.imshow(np.transpose(sample_image.numpy() / 2 + 0.5, (1, 2, 0)))
+        ax1.set_title(f'Original Image: {sample_label_name}')
+        ax1.axis('off')
+        ax2.imshow(heatmap, cmap='jet')
+        ax2.set_title('Grad-CAM Heatmap')
+        ax2.axis('off')
+        ax3.imshow(superimposed_img)
+        ax3.set_title('Superimposed Image')
+        ax3.axis('off')
+        plt.tight_layout()
+        # add some padding
+        plt.subplots_adjust(wspace=0.3)
+        plt.show()
+
+        # Show top 64 activated feature maps
+        print(f"  - Showing TOP 64 ACTIVATED FEATURE MAPS...")
+        visualize_activation_maps_for_image(net, sample_image, target_layer_index=first_conv_layer,
+                                            layer_name="Conv Layer 1",
+                                            image_label=f"{sample_label_name} (#{image_idx})",
+                                            num_maps=64)
+
+    print("\n" + "=" * 60)
+    print("VISUALIZATION COMPLETE")
+    print("=" * 60)
